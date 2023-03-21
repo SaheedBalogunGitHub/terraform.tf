@@ -1,0 +1,125 @@
+provider "aws" {
+  region = "eu-west-1"
+  access_key = "AKIAT7DWRRSJFA4XEGEV"
+  secret_key = "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"
+}
+
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "3.3.0"
+
+  name = "my-vpc"
+  cidr = "10.0.0.0/16"
+
+  azs             = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
+  enable_nat_gateway = true
+}
+
+resource "aws_security_group" "web" {
+  name_prefix = "web-sg-"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port = 22
+    to_port   = 22
+    protocol  = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_security_group" "alb" {
+  name_prefix = "alb-sg-"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    from_port = 80
+    to_port   = 80
+    protocol  = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_lb" "alb" {
+  name               = "my-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = module.vpc.public_subnets
+}
+
+resource "aws_lb_target_group" "web" {
+  name        = "web-target-group"
+  port        = 80
+  protocol    = "HTTP"
+  target_type = "instance"
+  vpc_id      = module.vpc.vpc_id
+
+  health_check {
+    path = "/"
+  }
+}
+
+resource "aws_launch_template" "web" {
+  name_prefix   = "web-lt-"
+  image_id      = "ami-0779c326801d5a843"
+  instance_type = "t2.micro"
+  key_name      = "my-key"
+  vpc_security_group_ids = [aws_security_group.web.id]
+
+  user_data = <<-EOF
+              #!/bin/bash
+              sudo yum update -y
+              sudo yum install nginx -y
+              sudo systemctl enable nginx
+              sudo systemctl start nginx
+              EOF
+}
+
+resource "aws_autoscaling_group" "web" {
+name_prefix = "web-asg-"
+vpc_zone_identifier = module.vpc.private_subnets
+target_group_arns = [aws_lb_target_group.web.arn]
+health_check_grace_period = 300
+min_size = 2
+max_size = 4
+desired_capacity = 2
+termination_policies = ["OldestInstance"]
+wait_for_capacity_timeout = "10m"
+protect_from_scale_in = false
+force_delete = true
+
+launch_template {
+    id      = aws_launch_template.web.id
+  }
+
+tag {
+key = "Name"
+value = "web"
+propagate_at_launch = true
+}
+}
+
